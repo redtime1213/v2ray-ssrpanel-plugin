@@ -1,4 +1,4 @@
-package v2ray_ssrpanel_plugin
+package ssrpanel
 
 import (
 	"fmt"
@@ -14,6 +14,7 @@ func init() {
 		if err != nil {
 			fatal(err)
 		}
+		newError("v0.4.0 started").AtWarning().WriteToLog()
 	}()
 }
 

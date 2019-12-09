@@ -1,4 +1,4 @@
-package v2ray_ssrpanel_plugin
+package ssrpanel
 
 import (
 	"code.cloudfoundry.org/bytefmt"
@@ -58,16 +58,27 @@ func (p *Panel) Start() {
 func (p *Panel) do() error {
 	var addedUserCount, deletedUserCount, onlineUsers int
 	var uplinkTotal, downlinkTotal uint64
+
+	if err := p.db.DB.DB().Ping(); err != nil {
+		p.db.RetryTimes++
+		newErrorf("Lost db connection, retry times: %d",
+			p.db.RetryTimes).AtDebug().WriteToLog()
+		return nil
+	}
+	p.db.RetryTimes = 0
+
 	defer func() {
 		newErrorf("+ %d users, - %d users, ↓ %s, ↑ %s, online %d",
 			addedUserCount, deletedUserCount, bytefmt.ByteSize(downlinkTotal), bytefmt.ByteSize(uplinkTotal), onlineUsers).AtDebug().WriteToLog()
 	}()
 
-	p.db.DB.Create(&NodeInfo{
+	if err := p.db.DB.Create(&NodeInfo{
 		NodeID: p.NodeID,
 		Uptime: time.Now().Sub(p.startAt) / time.Second,
 		Load:   getSystemLoad(),
-	})
+	}).Error; err != nil {
+		return err
+	}
 
 	userTrafficLogs, err := p.getTraffic()
 	if err != nil {
@@ -85,12 +96,21 @@ func (p *Panel) do() error {
 		uplinkTotal += log.Uplink
 		downlinkTotal += log.Downlink
 
-		log.Traffic = bytefmt.ByteSize(uplink+downlink)
-		p.db.DB.Create(&log)
+		log.Traffic = bytefmt.ByteSize(uplink + downlink)
+		p.db.DB.Create(&log.UserTrafficLog)
 
 		userIDs = append(userIDs, log.UserID)
 		uVals += fmt.Sprintf(" WHEN %d THEN u + %d", log.UserID, uplink)
 		dVals += fmt.Sprintf(" WHEN %d THEN d + %d", log.UserID, downlink)
+
+		if log.ipList != "" {
+			p.db.DB.Create(&NodeIP{
+				NodeID: log.NodeID,
+				UserID: log.UserID,
+				IPList: log.ipList,
+				Port:   log.UserPort,
+			})
+		}
 	}
 
 	if onlineUsers > 0 {
@@ -114,8 +134,15 @@ func (p *Panel) do() error {
 	return nil
 }
 
-func (p *Panel) getTraffic() (userTrafficLogs []UserTrafficLog, err error) {
+type userStatsLogs struct {
+	UserTrafficLog
+	ipList   string
+	UserPort int
+}
+
+func (p *Panel) getTraffic() (logs []userStatsLogs, err error) {
 	var downlink, uplink uint64
+	var ips string
 	for _, user := range p.userModels {
 		downlink, err = p.statsServiceClient.getUserDownlink(user.Email)
 		if err != nil {
@@ -128,12 +155,21 @@ func (p *Panel) getTraffic() (userTrafficLogs []UserTrafficLog, err error) {
 		}
 
 		if uplink+downlink > 0 {
-			userTrafficLogs = append(userTrafficLogs, UserTrafficLog{
-				UserID:   user.ID,
-				Uplink:   uplink,
-				Downlink: downlink,
-				NodeID:   p.NodeID,
-				Rate:     p.node.TrafficRate,
+			ips, err = p.statsServiceClient.getUserIPStats(user.Email, true)
+			if err != nil {
+				return
+			}
+
+			logs = append(logs, userStatsLogs{
+				UserTrafficLog: UserTrafficLog{
+					UserID:   user.ID,
+					Uplink:   uplink,
+					Downlink: downlink,
+					NodeID:   p.NodeID,
+					Rate:     p.node.TrafficRate,
+				},
+				ipList:   ips,
+				UserPort: user.Port,
 			})
 		}
 	}
@@ -148,6 +184,9 @@ func (p *Panel) mulTrafficRate(traffic uint64) uint64 {
 func (p *Panel) syncUser() (addedUserCount, deletedUserCount int, err error) {
 	userModels, err := p.db.GetAllUsers()
 	if err != nil {
+		return 0, 0, err
+	}
+	if len(userModels) == 0 {
 		return 0, 0, err
 	}
 

@@ -1,14 +1,16 @@
-package v2ray_ssrpanel_plugin
+package ssrpanel
 
 import (
-	"github.com/jinzhu/gorm"
 	"time"
+
+	"github.com/jinzhu/gorm"
 )
 
 type UserModel struct {
 	ID      uint
 	VmessID string
 	Email   string `gorm:"column:username"`
+	Port    int
 }
 
 func (*UserModel) TableName() string {
@@ -47,6 +49,24 @@ func (l *NodeOnlineLog) BeforeCreate(scope *gorm.Scope) error {
 	return nil
 }
 
+type NodeIP struct {
+	ID        uint `gorm:"primary_key"`
+	NodeID    uint
+	UserID    uint
+	Port      int
+	IPList    string `gorm:"column:ip"`
+	CreatedAt int64
+}
+
+func (*NodeIP) TableName() string {
+	return "ss_node_ip"
+}
+
+func (n *NodeIP) BeforeCreate(scope *gorm.Scope) error {
+	n.CreatedAt = time.Now().Unix()
+	return nil
+}
+
 type NodeInfo struct {
 	ID      uint `gorm:"primary_key"`
 	NodeID  uint
@@ -74,13 +94,14 @@ func (*Node) TableName() string {
 }
 
 type DB struct {
-	DB *gorm.DB
+	DB 			*gorm.DB
+	RetryTimes	int64
 }
 
 func (db *DB) GetAllUsers() ([]UserModel, error) {
 	users := make([]UserModel, 0)
-	db.DB.Select("id, vmess_id, username").Where("enable = 1 AND u + d < transfer_enable").Find(&users)
-	return users, nil
+	err := db.DB.Select("id, vmess_id, username, port").Where("enable = 1 AND u + d < transfer_enable").Find(&users).Error
+	return users, err
 }
 
 func (db *DB) GetNode(id uint) (*Node, error) {
